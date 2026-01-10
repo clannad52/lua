@@ -1,7 +1,5 @@
--- file: lua/backend-baidu.lua
-
-local http = require 'http'
-local backend = require 'backend'
+-- 修正版 baidu-http-backend.lua for Shadowrocket
+-- 确保所有回调函数被正确识别
 
 local char = string.char
 local byte = string.byte
@@ -30,6 +28,7 @@ local flags = {}
 local kHttpHeaderSent = 1
 local kHttpHeaderRecived = 2
 
+-- 关键：确保这些是全局函数，这是日志错误的根源
 function wa_lua_on_flags_cb(ctx)
     return DIRECT_WRITE
 end
@@ -44,11 +43,12 @@ function wa_lua_on_handshake_cb(ctx)
     if flags[uuid] ~= kHttpHeaderSent then
         local host = ctx_address_host(ctx)
         local port = ctx_address_port(ctx)
+        -- 使用论坛最新的认证头
         local res = 'CONNECT ' .. host .. ':' .. port .. ' HTTP/1.1\r\n' ..
-            'Host: ascdn.baidu.com\r\n' ..               -- 关键修改：固定Host
-            'Proxy-Connection: Keep-Alive\r\n'..
-            'X-T5-Auth: 1951164069\r\n' ..               -- 关键修改：使用最新值
-            'User-Agent: baiduboxapp\r\n\r\n'
+                    'Host: ascdn.baidu.com\r\n' ..  -- 固定Host头
+                    'Proxy-Connection: Keep-Alive\r\n'..
+                    'X-T5-Auth: 1951164069\r\n' ..    -- 最新值
+                    'User-Agent: baiduboxapp/13.33.0.11\r\n\r\n' -- 更完整的UA
         ctx_write(ctx, res)
         flags[uuid] = kHttpHeaderSent
     end
@@ -57,7 +57,6 @@ function wa_lua_on_handshake_cb(ctx)
 end
 
 function wa_lua_on_read_cb(ctx, buf)
-    ctx_debug('wa_lua_on_read_cb')
     local uuid = ctx_uuid(ctx)
     if flags[uuid] == kHttpHeaderSent then
         flags[uuid] = kHttpHeaderRecived
@@ -67,12 +66,10 @@ function wa_lua_on_read_cb(ctx, buf)
 end
 
 function wa_lua_on_write_cb(ctx, buf)
-    ctx_debug('wa_lua_on_write_cb')
     return DIRECT, buf
 end
 
 function wa_lua_on_close_cb(ctx)
-    ctx_debug('wa_lua_on_close_cb')
     local uuid = ctx_uuid(ctx)
     flags[uuid] = nil
     ctx_free(ctx)
