@@ -1,0 +1,102 @@
+-- file: lua/backend-baidu.lua
+
+local http = require 'http'
+local backend = require 'backend'
+
+local char = string.char
+local byte = string.byte
+local find = string.find
+local sub = string.sub
+
+local ADDRESS = backend.ADDRESS
+local PROXY = backend.PROXY
+local DIRECT_WRITE = backend.SUPPORT.DIRECT_WRITE
+
+local SUCCESS = backend.RESULT.SUCCESS
+local HANDSHAKE = backend.RESULT.HANDSHAKE
+local DIRECT = backend.RESULT.DIRECT
+
+local ctx_uuid = backend.get_uuid
+local ctx_proxy_type = backend.get_proxy_type
+local ctx_address_type = backend.get_address_type
+local ctx_address_host = backend.get_address_host
+local ctx_address_bytes = backend.get_address_bytes
+local ctx_address_port = backend.get_address_port
+local ctx_write = backend.write
+local ctx_free = backend.free
+-- local ctx_debug = backend.debug  -- 注释掉，如果不存在
+
+local flags = {}
+local kHttpHeaderSent = 1
+local kHttpHeaderRecived = 2
+
+function wa_lua_on_flags_cb(ctx)
+    return DIRECT_WRITE
+end
+
+function wa_lua_on_handshake_cb(ctx)
+    local uuid = ctx_uuid(ctx)
+
+    if flags[uuid] == kHttpHeaderRecived then
+        return true
+    end
+
+    if flags[uuid] ~= kHttpHeaderSent then
+        local host = ctx_address_host(ctx)
+        local port = ctx_address_port(ctx)
+        
+        -- 构建更完整的 CONNECT 请求
+        local res = 'CONNECT ' .. host .. ':' .. port .. ' HTTP/1.1\r\n' ..
+                    'Host: ' .. host .. ':' .. port .. '\r\n' ..
+                    'Proxy-Connection: Keep-Alive\r\n' ..
+                    'Connection: keep-alive\r\n' ..  -- 添加 Connection 头部
+                    'Proxy-Authorization: basic\r\n' ..  -- 如果需要认证
+                    'X-T5-Auth: YTY0Nzlk\r\n' ..
+                    'User-Agent: baiduboxapp\r\n' ..
+                    '\r\n'
+        
+        ctx_write(ctx, res)
+        flags[uuid] = kHttpHeaderSent
+    end
+
+    return false
+end
+
+function wa_lua_on_read_cb(ctx, buf)
+    -- ctx_debug('wa_lua_on_read_cb')  -- 如果不存在就注释掉
+    local uuid = ctx_uuid(ctx)
+    if flags[uuid] == kHttpHeaderSent then
+        -- 检查响应是否有效
+        if find(buf, 'HTTP/1.%d+ 200') or find(buf, 'HTTP/1.%d+ 2%d%d') then
+            flags[uuid] = kHttpHeaderRecived
+            return HANDSHAKE, nil
+        else
+            -- 返回错误响应
+            return DIRECT, buf
+        end
+    end
+    return DIRECT, buf
+end
+
+function wa_lua_on_write_cb(ctx, buf)
+    -- ctx_debug('wa_lua_on_write_cb')  -- 如果不存在就注释掉
+    return DIRECT, buf
+end
+
+function wa_lua_on_close_cb(ctx)
+    -- ctx_debug('wa_lua_on_close_cb')  -- 如果不存在就注释掉
+    local uuid = ctx_uuid(ctx)
+    flags[uuid] = nil
+    ctx_free(ctx)
+    return SUCCESS
+end
+
+-- 如果需要调试功能，添加安全的调试函数
+local function safe_debug(msg)
+    -- 尝试调用调试函数，如果不存在则忽略
+    pcall(function()
+        if backend.debug then
+            backend.debug(msg)
+        end
+    end)
+end
