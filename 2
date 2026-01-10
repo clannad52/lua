@@ -1,102 +1,79 @@
--- file: lua/backend-baidu.lua
+-- Baidu定向免流 HTTP 代理后端脚本 for Shadowrocket
+-- 主要功能：实现HTTP代理，并添加必要的认证请求头（如X-T5-Auth）
 
-local http = require 'http'
-local backend = require 'backend'
+local module = {}
 
-local char = string.char
-local byte = string.byte
-local find = string.find
-local sub = string.sub
+-- ====================== 配置区域 ======================
+-- 你可以在这里修改配置
 
-local ADDRESS = backend.ADDRESS
-local PROXY = backend.PROXY
-local DIRECT_WRITE = backend.SUPPORT.DIRECT_WRITE
+-- 1. 代理服务器列表 (从你的搜索结果或其他来源获取)
+-- 格式：{ "主机:端口", ... }
+local proxy_servers = {
+    "111.20.254.35:443",   -- 示例IP，来自搜索结果[citation:3]
+    "120.226.20.35:443",
+    "218.201.40.224:443",
+    -- 你可以添加更多在 Shodan/Zoomeye 找到的服务器
+    -- 例如："x.x.x.x:443",
+}
 
-local SUCCESS = backend.RESULT.SUCCESS
-local HANDSHAKE = backend.RESULT.HANDSHAKE
-local DIRECT = backend.RESULT.DIRECT
+-- 2. 必须添加的 HTTP 请求头
+-- 这是关键，可能用于服务器认证（如你发现的 ZjQxNDIh）
+local required_headers = {
+    "X-T5-Auth: ZjQxNDIh",  -- 请根据实际情况验证或更改此值
+    -- 可以添加其他可能的头部，例如：
+    -- "Host: baidu.com",
+    -- "User-Agent: Mozilla/5.0 ...",
+}
 
-local ctx_uuid = backend.get_uuid
-local ctx_proxy_type = backend.get_proxy_type
-local ctx_address_type = backend.get_address_type
-local ctx_address_host = backend.get_address_host
-local ctx_address_bytes = backend.get_address_bytes
-local ctx_address_port = backend.get_address_port
-local ctx_write = backend.write
-local ctx_free = backend.free
--- local ctx_debug = backend.debug  -- 注释掉，如果不存在
+-- 3. 当前选中的服务器索引
+local current_server_index = 1
 
-local flags = {}
-local kHttpHeaderSent = 1
-local kHttpHeaderRecived = 2
+-- ====================== 内部函数 ======================
 
-function wa_lua_on_flags_cb(ctx)
-    return DIRECT_WRITE
+-- 从列表中选择下一个服务器（简单的轮询）
+local function get_next_server()
+    local server = proxy_servers[current_server_index]
+    current_server_index = current_server_index + 1
+    if current_server_index > #proxy_servers then
+        current_server_index = 1
+    end
+    return server
 end
 
-function wa_lua_on_handshake_cb(ctx)
-    local uuid = ctx_uuid(ctx)
-
-    if flags[uuid] == kHttpHeaderRecived then
-        return true
-    end
-
-    if flags[uuid] ~= kHttpHeaderSent then
-        local host = ctx_address_host(ctx)
-        local port = ctx_address_port(ctx)
-        
-        -- 构建更完整的 CONNECT 请求
-        local res = 'CONNECT ' .. host .. ':' .. port .. ' HTTP/1.1\r\n' ..
-                    'Host: ' .. host .. ':' .. port .. '\r\n' ..
-                    'Proxy-Connection: Keep-Alive\r\n' ..
-                    'Connection: keep-alive\r\n' ..  -- 添加 Connection 头部
-                    'Proxy-Authorization: basic\r\n' ..  -- 如果需要认证
-                    'X-T5-Auth: YTY0Nzlk\r\n' ..
-                    'User-Agent: baiduboxapp\r\n' ..
-                    '\r\n'
-        
-        ctx_write(ctx, res)
-        flags[uuid] = kHttpHeaderSent
-    end
-
-    return false
-end
-
-function wa_lua_on_read_cb(ctx, buf)
-    -- ctx_debug('wa_lua_on_read_cb')  -- 如果不存在就注释掉
-    local uuid = ctx_uuid(ctx)
-    if flags[uuid] == kHttpHeaderSent then
-        -- 检查响应是否有效
-        if find(buf, 'HTTP/1.%d+ 200') or find(buf, 'HTTP/1.%d+ 2%d%d') then
-            flags[uuid] = kHttpHeaderRecived
-            return HANDSHAKE, nil
-        else
-            -- 返回错误响应
-            return DIRECT, buf
+-- 将必需的头部添加到请求中
+local function inject_required_headers(headers)
+    for _, req_header in ipairs(required_headers) do
+        local name, value = req_header:match("^([^:]+):%s*(.+)$")
+        if name and value then
+            headers[name] = value
         end
     end
-    return DIRECT, buf
+    return headers
 end
 
-function wa_lua_on_write_cb(ctx, buf)
-    -- ctx_debug('wa_lua_on_write_cb')  -- 如果不存在就注释掉
-    return DIRECT, buf
+-- ====================== 主处理函数 ======================
+
+function module.process(host, port, headers)
+    -- 获取下一个可用的代理服务器
+    local proxy = get_next_server()
+    local proxy_host, proxy_port = proxy:match("^([^:]+):(%d+)$")
+
+    if not proxy_host then
+        return nil, "无效的代理服务器格式"
+    end
+
+    -- 注入必需的请求头
+    headers = inject_required_headers(headers)
+
+    -- 返回代理连接信息
+    -- Shadowrocket 会使用此信息建立连接
+    return {
+        host = proxy_host,
+        port = tonumber(proxy_port),
+        headers = headers,
+        -- 如果代理服务器需要TLS/SSL，确保端口是443
+        -- 对于HTTPS代理，可能需要额外的TLS设置
+    }
 end
 
-function wa_lua_on_close_cb(ctx)
-    -- ctx_debug('wa_lua_on_close_cb')  -- 如果不存在就注释掉
-    local uuid = ctx_uuid(ctx)
-    flags[uuid] = nil
-    ctx_free(ctx)
-    return SUCCESS
-end
-
--- 如果需要调试功能，添加安全的调试函数
-local function safe_debug(msg)
-    -- 尝试调用调试函数，如果不存在则忽略
-    pcall(function()
-        if backend.debug then
-            backend.debug(msg)
-        end
-    end)
-end
+return module
