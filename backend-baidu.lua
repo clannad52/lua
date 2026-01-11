@@ -1,115 +1,80 @@
--- 文件名：backend-baidu-fixed.lua
--- 这是一个经过修正的HTTP CONNECT代理脚本
+-- file: lua/backend-baidu.lua
 
--- 第一步：确保backend模块加载成功
-local backend = nil
-local ok, err = pcall(function()
-    backend = require 'backend'
-end)
+local http = require 'http'
+local backend = require 'backend'
 
-if not backend then
-    -- 如果无法加载backend，尝试直接使用全局函数
-    -- 注意：Shadowrocket可能不依赖backend模块
-    print("[ERROR] Cannot load backend module")
-    return
-end
+local char = string.char
+local byte = string.byte
+local find = string.find
+local sub = string.sub
 
--- 定义必要的常量
-local DIRECT_WRITE = 1  -- 对应 backend.SUPPORT.DIRECT_WRITE
-local SUCCESS = 0       -- 对应 backend.RESULT.SUCCESS
-local HANDSHAKE = 1     -- 对应 backend.RESULT.HANDSHAKE
-local DIRECT = 0        -- 对应 backend.RESULT.DIRECT
+local ADDRESS = backend.ADDRESS
+local PROXY = backend.PROXY
+local DIRECT_WRITE = backend.SUPPORT.DIRECT_WRITE
 
--- 定义全局函数（必须在全局作用域）
+local SUCCESS = backend.RESULT.SUCCESS
+local HANDSHAKE = backend.RESULT.HANDSHAKE
+local DIRECT = backend.RESULT.DIRECT
+
+local ctx_uuid = backend.get_uuid
+local ctx_proxy_type = backend.get_proxy_type
+local ctx_address_type = backend.get_address_type
+local ctx_address_host = backend.get_address_host
+local ctx_address_bytes = backend.get_address_bytes
+local ctx_address_port = backend.get_address_port
+local ctx_write = backend.write
+local ctx_free = backend.free
+local ctx_debug = backend.debug
+
+local flags = {}
+local kHttpHeaderSent = 1
+local kHttpHeaderRecived = 2
+
 function wa_lua_on_flags_cb(ctx)
-    print("[DEBUG] wa_lua_on_flags_cb called")
     return DIRECT_WRITE
 end
 
 function wa_lua_on_handshake_cb(ctx)
-    print("[DEBUG] wa_lua_on_handshake_cb called")
-    
-    -- 获取目标地址
-    local host = "unknown"
-    local port = 0
-    
-    if backend and backend.get_address_host then
-        host = backend.get_address_host(ctx)
-        port = backend.get_address_port(ctx)
-    else
-        -- 备选方案：直接返回true，表示握手已完成
+    local uuid = ctx_uuid(ctx)
+
+    if flags[uuid] == kHttpHeaderRecived then
         return true
     end
-    
-    print("[DEBUG] Connecting to " .. host .. ":" .. port)
-    
-    -- 构建HTTP CONNECT请求
-    local request = string.format(
-        "CONNECT %s:%d HTTP/1.1\r\n" ..
-        "Host: %s:%d\r\n" ..
-        "Proxy-Connection: Keep-Alive\r\n" ..
-        "User-Agent: baiduboxapp\r\n" ..
-        "X-T5-Auth: YTY0Nzlk\r\n" ..
-        "\r\n",
-        host, port, host, port
-    )
-    
-    -- 发送请求
-    if backend and backend.write then
-        backend.write(ctx, request)
-    else
-        -- 备选方案：直接写入数据
-        return true
+
+    if flags[uuid] ~= kHttpHeaderSent then
+        local host = ctx_address_host(ctx)
+        local port = ctx_address_port(ctx)
+        local res = 'CONNECT ' .. host .. ':' .. port .. 'HTTP/1.1\r\n' ..
+                    'Host: 153.3.236.22:443\r\n' ..
+                    'User-Agent: Mozilla/5.0 (Linux; Android 12; RMX3300 Build/SKQ1.211019.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/97.0.4692.98 Mobile Safari/537.36 T7/13.32 SP-engine/2.70.0 baiduboxapp/13.32.0.10 (Baidu; P1 12) NABar/1.0\r\n'..
+                    'Proxy-Connection: Keep-Alive\r\n'..
+                    'X-T5-Auth: 683556433\r\n\r\n'
+        ctx_write(ctx, res)
+        flags[uuid] = kHttpHeaderSent
     end
-    
-    return false  -- 等待服务器响应
+
+    return false
 end
 
 function wa_lua_on_read_cb(ctx, buf)
-    if not buf then
-        return DIRECT, nil
-    end
-    
-    print("[DEBUG] wa_lua_on_read_cb, length: " .. #buf)
-    
-    -- 检查是否是握手响应
-    if string.find(buf, "HTTP/1.[01] 200") then
-        print("[DEBUG] Proxy handshake successful")
+    ctx_debug('wa_lua_on_read_cb')
+    local uuid = ctx_uuid(ctx)
+    if flags[uuid] == kHttpHeaderSent then
+        flags[uuid] = kHttpHeaderRecived
         return HANDSHAKE, nil
     end
-    
-    -- 检查是否是错误响应
-    if string.find(buf, "HTTP/1.[01] [^2]") then
-        print("[ERROR] Proxy handshake failed: " .. string.sub(buf, 1, 100))
-        return SUCCESS, nil  -- 关闭连接
-    end
-    
     return DIRECT, buf
 end
 
 function wa_lua_on_write_cb(ctx, buf)
-    if not buf then
-        return DIRECT, nil
-    end
-    
-    print("[DEBUG] wa_lua_on_write_cb, length: " .. #buf)
+    ctx_debug('wa_lua_on_write_cb')
     return DIRECT, buf
 end
 
 function wa_lua_on_close_cb(ctx)
-    print("[DEBUG] wa_lua_on_close_cb called")
-    
-    if backend and backend.free then
-        backend.free(ctx)
-    end
-    
+    ctx_debug('wa_lua_on_close_cb')
+    local uuid = ctx_uuid(ctx)
+    flags[uuid] = nil
+    ctx_free(ctx)
     return SUCCESS
 end
-
--- 可选：初始化函数
-function wa_lua_on_init_cb()
-    print("[INFO] Lua script initialized: backend-baidu-fixed.lua")
-    return SUCCESS
-end
-
-print("[INFO] Lua script loaded successfully")
